@@ -1,0 +1,186 @@
+x-healthcheck-default: &healthcheck-default
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
+
+x-common-env-vars: &common-env-vars
+  MONGODB_URL: mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD}@mongodb:27017/${MONGO_DB:-microservices}?authSource=admin
+
+
+# Base service definitions
+services:
+
+  chatbot:
+    image: ${DOCKER_REGISTRY}/chat-client-v1:${CHAT_VERSION:-latest}
+    container_name: chatbot_${ENVIRONMENT:-base}
+
+    env_file:
+      - ../env_files/chatbot.env
+
+    networks:
+      - agent-network
+    ports:
+      - "3001:3001"
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+####################################################################################################################
+
+
+  iam:
+    image: ${DOCKER_REGISTRY}/iam-assistant-v1:${IAM_VERSION:-latest}
+    container_name: iam_${ENVIRONMENT:-base}
+
+    env_file:
+      - ../env_files/iam.env
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    
+    networks:
+      - agent-network
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      <<: *healthcheck-default
+
+####################################################################################################################
+
+  agent:
+    image: ${DOCKER_REGISTRY}/agent-v1:${AGENT_VERSION:-latest}
+    container_name: agent_${ENVIRONMENT:-base}
+
+    env_file:
+      - ../env_files/agent.env
+
+    environment:
+      <<: *common-env-vars
+      RETRIEVER_URL: http://retriever:8004
+
+    depends_on:
+      retriever:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+
+    networks:
+      - agent-network
+    ports:
+      - "8000:8016"  
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8016/health"]
+      <<: *healthcheck-default
+
+####################################################################################################################     
+  manager:
+    image: ${DOCKER_REGISTRY}/rmanager-v1:${MANAGER_VERSION:-latest}
+    container_name: manager_${ENVIRONMENT:-base}
+
+    env_file:
+      - ../env_files/manager.env
+    environment:
+      <<: *common-env-vars
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+    networks:
+      - agent-network
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      <<: *healthcheck-default
+  
+####################################################################################################################
+
+  retriever:
+    image: ${DOCKER_REGISTRY}/rretriever-v1:${RETRIEVER_VERSION:-latest}
+    container_name: retriever_${ENVIRONMENT:-base}
+
+    env_file:
+      - ../env_files/retriever.env
+    environment:
+      <<: *common-env-vars
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: 8000
+    
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+
+    networks:
+      - agent-network
+    ports:
+      - "8004:8004" 
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      <<: *healthcheck-default
+
+####################################################################################################################
+
+  mongodb:
+    image: mongo:${MONGO_VERSION:-7.0}
+    container_name: mongodb_${ENVIRONMENT:-base}
+
+    volumes:
+      - /data/dbs/mongo/dbs_data:/data/db
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-rag}
+
+    networks:
+      - agent-network
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      <<: *healthcheck-default
+
+####################################################################################################################
+
+  chromadb:
+    image: frmlspa/chroma_assistant
+    container_name: chromadb_${ENVIRONMENT:-base}
+
+    volumes:
+      - /data/dbs/chroma:/data
+
+    environment:
+      - IS_PERSISTENT=TRUE
+      - CHROMA_DATA_PATH=/data
+      - ANONYMIZED_TELEMETRY=${ANONYMIZED_TELEMETRY:-TRUE}
+      - CHROMA_DB_IMPL=duckdb+parquet
+
+    networks:
+      - agent-network
+    ports:
+      - "8003:8000"
+    restart: unless-stopped
+
+networks:
+  agent-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  mongo-data:
+    driver: local
+  chroma-data:
+    driver: local
